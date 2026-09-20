@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--save-raw", action="store_true",
                         help="Also save lossless arrays: rgb_uint8.npz, flow_uv.npz, pointmap_xyz.npz and generated latents.")
+    parser.add_argument("--vae-tiling", action="store_true", help="KineJing: decode overlapping VAE tiles and transfer chunks to CPU; does not shrink transformer weights.")
     return parser
 
 
@@ -236,13 +237,18 @@ def encode_observation(encoder: Any, patchifier: VideoLatentPatchifier, image: t
 
 
 def decode_tokens(decoder: Any, patchifier: VideoLatentPatchifier, tokens: torch.Tensor,
-                  grid: tuple[int, int, int], seed: int, device: torch.device) -> torch.Tensor:
+                  grid: tuple[int, int, int], seed: int, device: torch.device, vae_tiling: bool = False) -> torch.Tensor:
     import torch
 
     from ltx_core.types import VideoLatentShape
 
     frames, height, width = grid
     latent = patchifier.unpatchify(tokens, VideoLatentShape(batch=1, channels=128, frames=frames, height=height, width=width))
+    if vae_tiling:
+        from causalwm.kinejing_decode import decode_tiled_to_cpu
+        return decode_tiled_to_cpu(decoder, latent.to(device=device, dtype=torch.bfloat16),
+                                   generator=torch.Generator(device=device).manual_seed(seed),
+                                   expected_frames=(frames - 1) * 8 + 1)
     decoded = decoder(latent.to(device=device, dtype=torch.bfloat16), generator=torch.Generator(device=device).manual_seed(seed))
     decoded = decoded[0] if isinstance(decoded, (tuple, list)) else decoded
     return decoded[0].float().clamp(-1, 1).permute(1, 0, 2, 3).cpu()
@@ -333,7 +339,7 @@ def generate(args: argparse.Namespace, metadata: dict[str, str]) -> None:
             torch.cuda.empty_cache()
         components.video_vae_decoder.to(device)
         images = {
-            name: decode_tokens(components.video_vae_decoder, patchifier, result.latents[:, result.seq.segment(name)], grid, args.seed, device)
+            name: decode_tokens(components.video_vae_decoder, patchifier, result.latents[:, result.seq.segment(name)], grid, args.seed, device, vae_tiling=args.vae_tiling)
             for name in result.seq.names
         }
     # Decoded tensors are inference-mode tensors; the in-place RGB0/flow0 restores below need normal tensors.
@@ -388,6 +394,7 @@ def generate(args: argparse.Namespace, metadata: dict[str, str]) -> None:
         "flow0_pixels": "restored deterministic zero-flow sentinel after VAE decode",
         "pointmap0_pixels": "generated; no post-decode replacement",
         "diagnostic_columns": ["RGB", "full-scene optical flow", "signed-log XYZ pointmap codec"],
+        "kinejing_vae_tiling": {"spatial_size": 256, "spatial_overlap": 64, "temporal_size": 32, "temporal_overlap": 8} if args.vae_tiling else None,
         "seconds": time.monotonic() - started,
     }
     (args.out_dir / "provenance.json").write_text(json.dumps(provenance, indent=2, ensure_ascii=False) + "\n")

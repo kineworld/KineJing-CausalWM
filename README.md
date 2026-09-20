@@ -1,3 +1,5 @@
+> **KineWorld derivative:** see [KINEJING.md](KINEJING.md) for our changes and validation limits. Upstream model claims below belong to Aether AI; no KineJing score is established.
+
 <p align="center">
   <img src="docs/assets/aetherai-mark.svg" alt="Aether AI" width="88" height="88">
 </p>
